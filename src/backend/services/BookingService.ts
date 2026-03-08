@@ -71,7 +71,7 @@ export class BookingService {
             vendorId: dto.vendorId,
             plannerId,
             status: 'quote_requested',
-            serviceCategory: dto.serviceCategory,
+            service: dto.serviceCategory,
             serviceDetails: dto.serviceDetails || null,
             quotedAmount: null,
             agreedAmount: null,

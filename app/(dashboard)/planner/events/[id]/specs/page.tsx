@@ -10,14 +10,14 @@ import {
     Building2, UtensilsCrossed, Camera, Sparkles, Music, Brush, Car,
     Plus, Trash2, Save, ChevronDown, ChevronUp, Users, Clock,
     Flower2, Armchair, Gift, Shield, Hotel, FileText, Heart,
-    Wine, Loader2, Search, ChevronRight, ChevronsUpDown, Info
+    Wine, Loader2, Search, ChevronRight, ChevronsUpDown, Info,
+    CheckCircle2
 } from 'lucide-react'
-import { eventRepository } from '@/lib/repositories/event-repository'
+import { createClient } from '@/lib/supabase/client'
 import { getSpecsForEventType, type CategorySpec, type SpecItem } from '@/lib/templates/event-specs-templates'
+import { getEventSpecs, saveEventSpecs, type CategorySpecData } from '@/actions/event-specs'
 import type { Event } from '@/types/domain'
-
-// Templates are loaded dynamically from event-specs-templates.ts based on event type
-// Color utility for category styling
+import { toast } from 'sonner'
 
 const getColorClasses = (color: string) => {
     const colors: Record<string, { bg: string; text: string; light: string; border: string }> = {
@@ -39,64 +39,132 @@ const getColorClasses = (color: string) => {
     return colors[color] || colors.blue
 }
 
+// Map category id to icon
+const ICON_MAP: Record<string, any> = {
+    venue: Building2, catering: UtensilsCrossed, bar: Wine, decor: Sparkles,
+    mandap: Heart, photography: Camera, entertainment: Music, transport: Car,
+    staff: Shield, accommodation: Hotel, mehendi: Brush, gifts: Gift,
+    branding: FileText, furniture: Armchair, av: Music, stationery: FileText,
+}
+
 export default function SpecificationsPage() {
     const params = useParams()
     const eventId = params.id as string
 
-    const [event, setEvent] = useState<Event | null>(null)
+    const [event, setEvent] = useState<any>(null)
     const [loading, setLoading] = useState(true)
+    const [saving, setSaving] = useState(false)
+    const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+    const [savedFromDb, setSavedFromDb] = useState(false)
     const [specs, setSpecs] = useState<CategorySpec[]>([])
     const [expandedCategories, setExpandedCategories] = useState<string[]>(['venue', 'catering'])
     const [searchQuery, setSearchQuery] = useState('')
 
     useEffect(() => {
         const loadEvent = async () => {
-            const data = await eventRepository.findById(eventId)
-            setEvent(data)
+            // Fetch event data
+            const supabase = createClient()
+            const { data: eventData } = await supabase
+                .from('events')
+                .select('*')
+                .eq('id', eventId)
+                .single()
 
-            // Load event-type-specific templates
-            let template: CategorySpec[]
-            if (data?.type) {
-                template = getSpecsForEventType(data.type)
+            setEvent(eventData)
+
+            // Try loading saved specs from DB
+            const savedResult = await getEventSpecs(eventId)
+
+            if (savedResult.data && savedResult.data.length > 0) {
+                // Convert DB data back to CategorySpec format
+                const savedSpecs: CategorySpec[] = savedResult.data.map(cat => ({
+                    id: cat.category_id,
+                    name: cat.category_name,
+                    icon: ICON_MAP[cat.category_id] || Sparkles,
+                    color: cat.category_color,
+                    vendor: cat.vendor_name,
+                    items: cat.items,
+                }))
+                setSpecs(savedSpecs)
+                setSavedFromDb(true)
             } else {
-                template = getSpecsForEventType('wedding')
-            }
-
-            // Fetch actual assigned vendors and update template vendor names
-            try {
-                const { createClient } = await import('@/lib/supabase/client')
-                const supabase = createClient()
-
-                const { data: assignments } = await supabase
-                    .from('vendor_assignments')
-                    .select('vendor_category, vendor_id, vendors:vendor_id(company_name)')
-                    .eq('event_id', eventId)
-
-                if (assignments && assignments.length > 0) {
-                    // Map category to vendor name
-                    const vendorNameMap: Record<string, string> = {}
-                    for (const a of assignments) {
-                        const vendorName = (a as any).vendors?.company_name
-                        if (vendorName && a.vendor_category) {
-                            vendorNameMap[a.vendor_category] = vendorName
-                        }
-                    }
-
-                    // Update template vendor names with actual assigned vendors
-                    template = template.map(cat => ({
-                        ...cat,
-                        vendor: vendorNameMap[cat.id] || cat.vendor,
-                    }))
+                // Fall back to template
+                let template: CategorySpec[]
+                if (eventData?.type) {
+                    template = getSpecsForEventType(eventData.type)
+                } else {
+                    template = getSpecsForEventType('wedding')
                 }
-            } catch (e) {
-                console.error('Failed to fetch vendor names for specs:', e)
+
+                // Overlay vendor names from assignments
+                try {
+                    const { data: assignments } = await supabase
+                        .from('vendor_assignments')
+                        .select('vendor_category, vendor_id, vendors:vendor_id(company_name)')
+                        .eq('event_id', eventId)
+
+                    if (assignments && assignments.length > 0) {
+                        const vendorNameMap: Record<string, string> = {}
+                        for (const a of assignments) {
+                            const vendorName = (a as any).vendors?.company_name
+                            if (vendorName && a.vendor_category) {
+                                vendorNameMap[a.vendor_category] = vendorName
+                            }
+                        }
+                        template = template.map(cat => ({
+                            ...cat,
+                            vendor: vendorNameMap[cat.id] || cat.vendor,
+                        }))
+                    }
+                } catch (e) {
+                    console.error('Failed to fetch vendor names for specs:', e)
+                }
+
+                setSpecs(template)
+                setSavedFromDb(false)
             }
 
-            setSpecs(template)
             setLoading(false)
         }
         loadEvent()
     }, [eventId])
+
+    // Mark unsaved changes on any spec modification
+    const updateSpecs = (updater: (prev: CategorySpec[]) => CategorySpec[]) => {
+        setSpecs(prev => {
+            const next = updater(prev)
+            setHasUnsavedChanges(true)
+            return next
+        })
+    }
+
+    const handleSave = async () => {
+        setSaving(true)
+        const categories: CategorySpecData[] = specs.map(cat => ({
+            category_id: cat.id,
+            category_name: cat.name,
+            category_color: cat.color,
+            vendor_name: cat.vendor,
+            items: cat.items.map(item => ({
+                id: item.id,
+                name: item.name,
+                quantity: item.quantity,
+                unit: item.unit,
+                unitPrice: item.unitPrice,
+                notes: item.notes,
+            })),
+        }))
+
+        const result = await saveEventSpecs(eventId, categories)
+        if (result.success) {
+            toast.success('Specifications saved successfully!')
+            setHasUnsavedChanges(false)
+            setSavedFromDb(true)
+        } else {
+            toast.error(`Failed to save: ${result.error}`)
+        }
+        setSaving(false)
+    }
 
     const toggleCategory = (categoryId: string) => {
         setExpandedCategories(prev =>
@@ -110,7 +178,7 @@ export default function SpecificationsPage() {
     const collapseAll = () => setExpandedCategories([])
 
     const updateItemQuantity = (categoryId: string, itemId: string, quantity: number) => {
-        setSpecs(prev => prev.map(cat => {
+        updateSpecs(prev => prev.map(cat => {
             if (cat.id === categoryId) {
                 return {
                     ...cat,
@@ -124,7 +192,7 @@ export default function SpecificationsPage() {
     }
 
     const updateItemNotes = (categoryId: string, itemId: string, notes: string) => {
-        setSpecs(prev => prev.map(cat => {
+        updateSpecs(prev => prev.map(cat => {
             if (cat.id === categoryId) {
                 return {
                     ...cat,
@@ -145,7 +213,7 @@ export default function SpecificationsPage() {
             unit: 'units',
             unitPrice: 0,
         }
-        setSpecs(prev => prev.map(cat => {
+        updateSpecs(prev => prev.map(cat => {
             if (cat.id === categoryId) {
                 return { ...cat, items: [...cat.items, newItem] }
             }
@@ -154,7 +222,7 @@ export default function SpecificationsPage() {
     }
 
     const removeItem = (categoryId: string, itemId: string) => {
-        setSpecs(prev => prev.map(cat => {
+        updateSpecs(prev => prev.map(cat => {
             if (cat.id === categoryId) {
                 return { ...cat, items: cat.items.filter(item => item.id !== itemId) }
             }
@@ -169,7 +237,6 @@ export default function SpecificationsPage() {
     const totalBudget = specs.reduce((sum, cat) => sum + calculateCategoryTotal(cat.items), 0)
     const totalItems = specs.reduce((sum, cat) => sum + cat.items.length, 0)
 
-    // Filter specs based on search
     const filteredSpecs = searchQuery
         ? specs.filter(cat =>
             cat.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -195,6 +262,16 @@ export default function SpecificationsPage() {
                         <Badge variant="outline" className="capitalize">
                             {event?.type || 'Wedding'} Template
                         </Badge>
+                        {savedFromDb && (
+                            <Badge className="bg-green-100 text-green-700 border-green-300">
+                                <CheckCircle2 className="w-3 h-3 mr-1" /> Saved
+                            </Badge>
+                        )}
+                        {hasUnsavedChanges && (
+                            <Badge className="bg-amber-100 text-amber-700 border-amber-300">
+                                Unsaved Changes
+                            </Badge>
+                        )}
                     </div>
                     <p className="text-sm text-gray-500">
                         Detailed line items across {specs.length} categories for your {event?.type || 'wedding'} event
@@ -215,8 +292,16 @@ export default function SpecificationsPage() {
                         <p className="text-2xl font-bold text-green-600">₹{(totalBudget / 100000).toFixed(2)}L</p>
                         <p className="text-xs text-gray-500">Total Est.</p>
                     </div>
-                    <Button className="bg-green-600 hover:bg-green-700">
-                        <Save className="w-4 h-4 mr-2" /> Save
+                    <Button
+                        className="bg-green-600 hover:bg-green-700"
+                        onClick={handleSave}
+                        disabled={saving}
+                    >
+                        {saving ? (
+                            <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving...</>
+                        ) : (
+                            <><Save className="w-4 h-4 mr-2" /> Save</>
+                        )}
                     </Button>
                 </div>
             </div>
@@ -268,7 +353,7 @@ export default function SpecificationsPage() {
             {/* Category Cards */}
             <div className="space-y-4">
                 {filteredSpecs.map(category => {
-                    const Icon = category.icon
+                    const Icon = ICON_MAP[category.id] || category.icon || Sparkles
                     const colors = getColorClasses(category.color)
                     const isExpanded = expandedCategories.includes(category.id)
                     const categoryTotal = calculateCategoryTotal(category.items)
@@ -323,7 +408,7 @@ export default function SpecificationsPage() {
                                                                 value={item.name}
                                                                 className="h-8 text-sm"
                                                                 onChange={(e) => {
-                                                                    setSpecs(prev => prev.map(cat => {
+                                                                    updateSpecs(prev => prev.map(cat => {
                                                                         if (cat.id === category.id) {
                                                                             return {
                                                                                 ...cat,
@@ -348,7 +433,25 @@ export default function SpecificationsPage() {
                                                         </td>
                                                         <td className="p-3 text-gray-500">{item.unit}</td>
                                                         <td className="p-3 text-right">
-                                                            {item.unitPrice !== undefined ? `₹${item.unitPrice.toLocaleString()}` : '-'}
+                                                            <Input
+                                                                type="number"
+                                                                value={item.unitPrice || 0}
+                                                                onChange={(e) => {
+                                                                    updateSpecs(prev => prev.map(cat => {
+                                                                        if (cat.id === category.id) {
+                                                                            return {
+                                                                                ...cat,
+                                                                                items: cat.items.map(i =>
+                                                                                    i.id === item.id ? { ...i, unitPrice: Number(e.target.value) } : i
+                                                                                )
+                                                                            }
+                                                                        }
+                                                                        return cat
+                                                                    }))
+                                                                }}
+                                                                className="h-8 text-sm text-right w-24"
+                                                                min={0}
+                                                            />
                                                         </td>
                                                         <td className="p-3 text-right font-medium">
                                                             {item.unitPrice !== undefined

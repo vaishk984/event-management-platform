@@ -89,7 +89,11 @@ export default function ProposalPreviewPage() {
                 .single()
 
             if (eventError) throw eventError
-            setEvent(eventData as Event)
+            setEvent({
+                ...eventData,
+                guestCount: eventData.guest_count,
+                budgetMax: eventData.budget_max
+            } as Event)
 
             // Fetch timeline items
             const { data: timelineData } = await supabase
@@ -108,18 +112,25 @@ export default function ProposalPreviewPage() {
             // Group vendors by category
             const vendorsByCategory: VendorCategory[] = bookingRequests
                 .filter(req => req.status !== 'declined')
-                .map((req: any) => ({
-                    id: req.vendorCategory || 'other',
-                    name: formatCategoryName(req.vendorCategory || 'other'),
-                    icon: getCategoryIcon(req.vendorCategory || 'other'),
-                    vendor: {
-                        name: req.vendorName || 'Unknown Vendor',
-                        description: req.vendorDescription || `Professional ${formatCategoryName(req.vendorCategory || '')} service`,
-                        price: req.quotedAmount || req.vendorPrice || 0,
-                        rating: req.vendorRating || 0
-                    },
-                    included: req.requirements ? [req.requirements] : []
-                }))
+                .map((req: any) => {
+                    const isCatering = req.vendorCategory === 'catering' || req.vendorCategory?.includes('food')
+                    const unitPrice = req.quotedAmount || req.vendorPrice || 0
+                    const guestCount = eventData.guest_count || 350
+                    const totalPrice = isCatering ? unitPrice * guestCount : unitPrice
+
+                    return {
+                        id: req.vendorCategory || 'other',
+                        name: formatCategoryName(req.vendorCategory || 'other'),
+                        icon: getCategoryIcon(req.vendorCategory || 'other'),
+                        vendor: {
+                            name: req.vendorName || 'Unknown Vendor',
+                            description: req.vendorDescription || `Professional ${formatCategoryName(req.vendorCategory || '')} service`,
+                            price: totalPrice,
+                            rating: req.vendorRating || 0
+                        },
+                        included: req.requirements ? [req.requirements] : []
+                    }
+                })
 
             console.log('[ProposalPreview] vendorsByCategory:', vendorsByCategory)
             setCategories(vendorsByCategory)

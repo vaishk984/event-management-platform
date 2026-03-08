@@ -6,42 +6,60 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import {
-    Clock, CheckCircle2, AlertTriangle, Play, User, MapPin,
-    Phone, RefreshCw, ChevronRight, Zap, Users, Calendar
+    Clock, CheckCircle2, AlertTriangle, User, MapPin,
+    RefreshCw, Zap, Users, Camera, MessageSquare, Send,
+    Loader2, Image as ImageIcon
 } from 'lucide-react'
 import { toast } from 'sonner'
-import type { Event, EventFunction, TimelineItem, VendorAssignment } from '@/types/domain'
-import { getFunctionsForEvent } from '@/lib/stores/event-functions'
-import { getTimelineForFunction, updateTimelineStatus, getTimelineStats } from '@/lib/stores/timeline-store'
-import { getAssignmentsForFunction, markArrival, getAssignmentSummary } from '@/lib/stores/vendor-assignment-store'
+import type { Event } from '@/types/domain'
+import { getEventDayVendors, getUpdatesForEvent } from '@/actions/vendor-updates'
+import { createClient } from '@/lib/supabase/client'
 
 interface EventDayDashboardProps {
     event: Event
 }
 
+interface VendorInfo {
+    id: string
+    vendorId: string
+    vendorName: string
+    vendorCategory: string
+    vendorImage: string | null
+    arrivalStatus: string
+    arrivedAt: string | null
+    departedAt: string | null
+    agreedAmount: number
+    status: string
+    source: string
+}
+
+interface VendorUpdate {
+    id: string
+    event_id: string
+    vendor_id: string
+    update_type: string
+    message: string | null
+    photo_url: string | null
+    status_tag: string | null
+    created_at: string
+    vendor?: {
+        id: string
+        company_name: string
+        category: string
+        image_url: string | null
+    }
+}
+
 export function EventDayDashboard({ event }: EventDayDashboardProps) {
-    const [functions, setFunctions] = useState<EventFunction[]>([])
-    const [selectedFunction, setSelectedFunction] = useState<EventFunction | null>(null)
-    const [timelineItems, setTimelineItems] = useState<TimelineItem[]>([])
-    const [vendors, setVendors] = useState<VendorAssignment[]>([])
+    const [vendors, setVendors] = useState<VendorInfo[]>([])
+    const [updates, setUpdates] = useState<VendorUpdate[]>([])
+    const [loading, setLoading] = useState(true)
     const [currentTime, setCurrentTime] = useState(new Date())
 
-    // Load functions
+    // Load data
     useEffect(() => {
-        const funcs = getFunctionsForEvent(event.id)
-        setFunctions(funcs)
-        if (funcs.length > 0 && !selectedFunction) {
-            setSelectedFunction(funcs[0])
-        }
-    }, [event.id, selectedFunction])
-
-    // Load timeline and vendors for selected function
-    useEffect(() => {
-        if (selectedFunction) {
-            setTimelineItems(getTimelineForFunction(selectedFunction.id))
-            setVendors(getAssignmentsForFunction(selectedFunction.id))
-        }
-    }, [selectedFunction])
+        loadDashboardData()
+    }, [event.id])
 
     // Update current time every minute
     useEffect(() => {
@@ -51,34 +69,89 @@ export function EventDayDashboard({ event }: EventDayDashboardProps) {
         return () => clearInterval(interval)
     }, [])
 
-    const handleMarkArrival = (assignmentId: string, vendorName: string) => {
-        markArrival(assignmentId)
-        setVendors(vendors.map(v =>
-            v.id === assignmentId ? { ...v, arrivedAt: new Date().toISOString() } : v
-        ))
-        toast.success(`${vendorName} marked as arrived`)
-    }
+    // Subscribe to real-time updates
+    useEffect(() => {
+        const supabase = createClient()
+        const channel = supabase
+            .channel(`event-day-${event.id}`)
+            .on(
+                'postgres_changes',
+                {
+                    event: 'INSERT',
+                    schema: 'public',
+                    table: 'vendor_updates',
+                    filter: `event_id=eq.${event.id}`
+                },
+                (payload) => {
+                    // Refresh data when a new update comes in
+                    loadDashboardData()
+                    toast.info('New vendor update received!')
+                }
+            )
+            .subscribe()
 
-    const handleStatusChange = (itemId: string, status: TimelineItem['status']) => {
-        updateTimelineStatus(itemId, status)
-        setTimelineItems(getTimelineForFunction(selectedFunction?.id || ''))
-        toast.success(`Status updated to ${status}`)
+        return () => {
+            supabase.removeChannel(channel)
+        }
+    }, [event.id])
+
+    const loadDashboardData = async () => {
+        try {
+            const [vendorData, updateData] = await Promise.all([
+                getEventDayVendors(event.id),
+                getUpdatesForEvent(event.id)
+            ])
+            setVendors(vendorData)
+            setUpdates(updateData)
+        } catch (error) {
+            console.error('Failed to load dashboard data:', error)
+        } finally {
+            setLoading(false)
+        }
     }
 
     // Calculate stats
-    const stats = selectedFunction ? getTimelineStats(selectedFunction.id) : { total: 0, completed: 0, delayed: 0, inProgress: 0, pending: 0 }
-    const vendorStats = selectedFunction ? getAssignmentSummary(event.id) : { total: 0, arrived: 0, confirmed: 0 }
+    const totalVendors = vendors.length
+    const arrivedVendors = vendors.filter(v => v.arrivalStatus === 'arrived').length
+    const departedVendors = vendors.filter(v => v.arrivalStatus === 'departed').length
+    const pendingVendors = vendors.filter(v => v.arrivalStatus === 'pending').length
 
-    // Find current and next timeline items based on time
-    const now = currentTime.toTimeString().slice(0, 5)
-    const upcomingItems = timelineItems.filter(item =>
-        item.status === 'pending' || item.status === 'in_progress'
-    ).slice(0, 5)
+    const photoUpdates = updates.filter(u => u.update_type === 'photo')
+    const statusUpdates = updates.filter(u => u.update_type === 'status' || u.update_type === 'arrival')
+    const noteUpdates = updates.filter(u => u.update_type === 'note')
 
-    const delayedItems = timelineItems.filter(item => item.status === 'delayed')
-    const pendingVendors = vendors.filter(v => v.status === 'confirmed' && !v.arrivedAt)
+    const progressPercent = totalVendors > 0 ? ((arrivedVendors + departedVendors) / totalVendors) * 100 : 0
 
-    const progressPercent = stats.total > 0 ? (stats.completed / stats.total) * 100 : 0
+    const getStatusIcon = (tag: string | null) => {
+        switch (tag) {
+            case 'arrived': return '📍'
+            case 'setup_started': return '🔧'
+            case 'setup_complete': return '✅'
+            case 'in_progress': return '🎯'
+            case 'completed': return '🏁'
+            case 'issue': return '⚠️'
+            case 'departed': return '👋'
+            default: return '📝'
+        }
+    }
+
+    const getUpdateIcon = (type: string) => {
+        switch (type) {
+            case 'photo': return <Camera className="w-4 h-4 text-blue-500" />
+            case 'arrival': return <MapPin className="w-4 h-4 text-emerald-500" />
+            case 'status': return <Zap className="w-4 h-4 text-purple-500" />
+            case 'note': return <MessageSquare className="w-4 h-4 text-orange-500" />
+            default: return <Send className="w-4 h-4 text-gray-500" />
+        }
+    }
+
+    if (loading) {
+        return (
+            <div className="flex items-center justify-center h-[60vh]">
+                <Loader2 className="w-8 h-8 animate-spin text-orange-500" />
+            </div>
+        )
+    }
 
     return (
         <div className="space-y-6">
@@ -91,37 +164,18 @@ export function EventDayDashboard({ event }: EventDayDashboardProps) {
                     </div>
                     <h2 className="text-2xl font-bold text-gray-900">Event Day Dashboard</h2>
                     <p className="text-gray-500">
-                        {currentTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })} •
+                        {currentTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })} •{' '}
                         {event.name}
                     </p>
                 </div>
                 <Button variant="outline" onClick={() => {
-                    if (selectedFunction) {
-                        setTimelineItems(getTimelineForFunction(selectedFunction.id))
-                        setVendors(getAssignmentsForFunction(selectedFunction.id))
-                    }
+                    setLoading(true)
+                    loadDashboardData()
                     toast.success('Dashboard refreshed')
                 }}>
                     <RefreshCw className="w-4 h-4 mr-2" /> Refresh
                 </Button>
             </div>
-
-            {/* Function Selector */}
-            {functions.length > 1 && (
-                <div className="flex gap-2 overflow-x-auto pb-2">
-                    {functions.map(func => (
-                        <Button
-                            key={func.id}
-                            variant={selectedFunction?.id === func.id ? 'default' : 'outline'}
-                            size="sm"
-                            onClick={() => setSelectedFunction(func)}
-                            className={selectedFunction?.id === func.id ? 'bg-orange-500 hover:bg-orange-600' : ''}
-                        >
-                            {func.name}
-                        </Button>
-                    ))}
-                </div>
-            )}
 
             {/* Quick Stats */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -132,22 +186,22 @@ export function EventDayDashboard({ event }: EventDayDashboardProps) {
                                 <CheckCircle2 className="w-5 h-5 text-green-600" />
                             </div>
                             <div>
-                                <p className="text-2xl font-bold text-green-700">{stats.completed}/{stats.total}</p>
-                                <p className="text-xs text-green-600">Tasks Done</p>
+                                <p className="text-2xl font-bold text-green-700">{arrivedVendors}/{totalVendors}</p>
+                                <p className="text-xs text-green-600">Vendors Arrived</p>
                             </div>
                         </div>
                     </CardContent>
                 </Card>
 
-                <Card className={`${delayedItems.length > 0 ? 'bg-gradient-to-br from-red-50 to-rose-50 border-red-200' : 'bg-gray-50'}`}>
+                <Card className={`${pendingVendors > 0 ? 'bg-gradient-to-br from-amber-50 to-yellow-50 border-amber-200' : 'bg-gray-50'}`}>
                     <CardContent className="p-4">
                         <div className="flex items-center gap-3">
-                            <div className={`w-10 h-10 rounded-xl ${delayedItems.length > 0 ? 'bg-red-100' : 'bg-gray-100'} flex items-center justify-center`}>
-                                <AlertTriangle className={`w-5 h-5 ${delayedItems.length > 0 ? 'text-red-600' : 'text-gray-400'}`} />
+                            <div className={`w-10 h-10 rounded-xl ${pendingVendors > 0 ? 'bg-amber-100' : 'bg-gray-100'} flex items-center justify-center`}>
+                                <Clock className={`w-5 h-5 ${pendingVendors > 0 ? 'text-amber-600' : 'text-gray-400'}`} />
                             </div>
                             <div>
-                                <p className={`text-2xl font-bold ${delayedItems.length > 0 ? 'text-red-700' : 'text-gray-700'}`}>{delayedItems.length}</p>
-                                <p className={`text-xs ${delayedItems.length > 0 ? 'text-red-600' : 'text-gray-500'}`}>Delayed</p>
+                                <p className={`text-2xl font-bold ${pendingVendors > 0 ? 'text-amber-700' : 'text-gray-700'}`}>{pendingVendors}</p>
+                                <p className={`text-xs ${pendingVendors > 0 ? 'text-amber-600' : 'text-gray-500'}`}>Awaiting</p>
                             </div>
                         </div>
                     </CardContent>
@@ -157,11 +211,11 @@ export function EventDayDashboard({ event }: EventDayDashboardProps) {
                     <CardContent className="p-4">
                         <div className="flex items-center gap-3">
                             <div className="w-10 h-10 rounded-xl bg-blue-100 flex items-center justify-center">
-                                <Users className="w-5 h-5 text-blue-600" />
+                                <Camera className="w-5 h-5 text-blue-600" />
                             </div>
                             <div>
-                                <p className="text-2xl font-bold text-blue-700">{vendorStats.arrived}/{vendors.length}</p>
-                                <p className="text-xs text-blue-600">Vendors Arrived</p>
+                                <p className="text-2xl font-bold text-blue-700">{photoUpdates.length}</p>
+                                <p className="text-xs text-blue-600">Photos</p>
                             </div>
                         </div>
                     </CardContent>
@@ -186,145 +240,170 @@ export function EventDayDashboard({ event }: EventDayDashboardProps) {
             <Card>
                 <CardContent className="py-4">
                     <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-medium">Overall Progress</span>
-                        <span className="text-sm text-gray-500">{stats.completed} of {stats.total} tasks</span>
+                        <span className="text-sm font-medium">Vendor Arrival Progress</span>
+                        <span className="text-sm text-gray-500">{arrivedVendors + departedVendors} of {totalVendors} checked in</span>
                     </div>
                     <Progress value={progressPercent} className="h-3 [&>div]:bg-gradient-to-r [&>div]:from-orange-400 [&>div]:to-amber-400" />
                 </CardContent>
             </Card>
 
             <div className="grid md:grid-cols-2 gap-6">
-                {/* Upcoming Tasks */}
+                {/* Vendor Status Cards */}
                 <Card>
                     <CardHeader className="pb-3">
                         <CardTitle className="text-lg flex items-center gap-2">
-                            <Clock className="w-5 h-5 text-orange-500" />
-                            Upcoming Tasks
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                        {upcomingItems.length === 0 ? (
-                            <div className="text-center py-6 text-gray-400">
-                                <CheckCircle2 className="w-8 h-8 mx-auto mb-2 text-green-400" />
-                                <p>All tasks completed!</p>
-                            </div>
-                        ) : (
-                            upcomingItems.map((item, index) => (
-                                <div
-                                    key={item.id}
-                                    className={`flex items-center gap-3 p-3 rounded-lg border ${index === 0 ? 'bg-orange-50 border-orange-200' : 'bg-gray-50'
-                                        }`}
-                                >
-                                    <div className="text-center min-w-[50px]">
-                                        <p className="font-mono font-bold text-lg">{item.startTime}</p>
-                                    </div>
-                                    <div className="flex-1">
-                                        <p className="font-medium">{item.title}</p>
-                                        <p className="text-sm text-gray-500">{item.owner}</p>
-                                    </div>
-                                    <div className="flex gap-1">
-                                        {item.status === 'pending' && (
-                                            <Button
-                                                size="sm"
-                                                className="bg-blue-500 hover:bg-blue-600"
-                                                onClick={() => handleStatusChange(item.id, 'in_progress')}
-                                            >
-                                                <Play className="w-3 h-3 mr-1" /> Start
-                                            </Button>
-                                        )}
-                                        {item.status === 'in_progress' && (
-                                            <Button
-                                                size="sm"
-                                                className="bg-green-500 hover:bg-green-600"
-                                                onClick={() => handleStatusChange(item.id, 'completed')}
-                                            >
-                                                <CheckCircle2 className="w-3 h-3 mr-1" /> Done
-                                            </Button>
-                                        )}
-                                    </div>
-                                </div>
-                            ))
-                        )}
-                    </CardContent>
-                </Card>
-
-                {/* Vendor Status */}
-                <Card>
-                    <CardHeader className="pb-3">
-                        <CardTitle className="text-lg flex items-center gap-2">
-                            <User className="w-5 h-5 text-blue-500" />
-                            Vendor Arrivals
+                            <Users className="w-5 h-5 text-blue-500" />
+                            Vendor Status ({totalVendors})
                         </CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-3">
                         {vendors.length === 0 ? (
                             <div className="text-center py-6 text-gray-400">
                                 <User className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                <p>No vendors assigned</p>
+                                <p>No vendors assigned to this event</p>
                             </div>
                         ) : (
                             vendors.map(vendor => (
                                 <div
-                                    key={vendor.id}
-                                    className={`flex items-center gap-3 p-3 rounded-lg border ${vendor.arrivedAt ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'
+                                    key={vendor.vendorId}
+                                    className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${vendor.arrivalStatus === 'arrived'
+                                        ? 'bg-green-50 border-green-200'
+                                        : vendor.arrivalStatus === 'departed'
+                                            ? 'bg-gray-50 border-gray-200'
+                                            : 'bg-amber-50 border-amber-200'
                                         }`}
                                 >
-                                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${vendor.arrivedAt ? 'bg-green-100' : 'bg-amber-100'
+                                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${vendor.arrivalStatus === 'arrived'
+                                        ? 'bg-green-100'
+                                        : vendor.arrivalStatus === 'departed'
+                                            ? 'bg-gray-100'
+                                            : 'bg-amber-100'
                                         }`}>
-                                        {vendor.arrivedAt ? (
+                                        {vendor.arrivalStatus === 'arrived' ? (
                                             <CheckCircle2 className="w-5 h-5 text-green-600" />
+                                        ) : vendor.arrivalStatus === 'departed' ? (
+                                            <CheckCircle2 className="w-5 h-5 text-gray-500" />
                                         ) : (
                                             <Clock className="w-5 h-5 text-amber-600" />
                                         )}
                                     </div>
                                     <div className="flex-1">
                                         <p className="font-medium">{vendor.vendorName}</p>
-                                        <p className="text-sm text-gray-500">{vendor.vendorCategory}</p>
+                                        <p className="text-sm text-gray-500 capitalize">{vendor.vendorCategory}</p>
                                     </div>
-                                    {vendor.arrivedAt ? (
-                                        <Badge className="bg-green-100 text-green-700">Arrived</Badge>
-                                    ) : (
-                                        <Button
-                                            size="sm"
-                                            variant="outline"
-                                            onClick={() => handleMarkArrival(vendor.id, vendor.vendorName)}
-                                        >
-                                            Mark Arrival
-                                        </Button>
-                                    )}
+                                    <Badge className={
+                                        vendor.arrivalStatus === 'arrived'
+                                            ? 'bg-green-100 text-green-700'
+                                            : vendor.arrivalStatus === 'departed'
+                                                ? 'bg-gray-100 text-gray-700'
+                                                : 'bg-amber-100 text-amber-700'
+                                    }>
+                                        {vendor.arrivalStatus === 'arrived' ? 'Arrived' :
+                                            vendor.arrivalStatus === 'departed' ? 'Departed' : 'Awaiting'}
+                                    </Badge>
                                 </div>
                             ))
                         )}
                     </CardContent>
                 </Card>
+
+                {/* Live Update Feed */}
+                <Card>
+                    <CardHeader className="pb-3">
+                        <CardTitle className="text-lg flex items-center gap-2">
+                            <Zap className="w-5 h-5 text-orange-500" />
+                            Live Updates
+                            {updates.length > 0 && (
+                                <Badge variant="outline" className="ml-auto">{updates.length}</Badge>
+                            )}
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        {updates.length === 0 ? (
+                            <div className="text-center py-8 text-gray-400">
+                                <MessageSquare className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                <p>No updates yet</p>
+                                <p className="text-sm">Vendor updates will appear here in real-time</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-4 max-h-[500px] overflow-y-auto">
+                                {updates.map(update => (
+                                    <div key={update.id} className="flex gap-3">
+                                        {/* Timeline dot */}
+                                        <div className="flex flex-col items-center">
+                                            <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center flex-shrink-0">
+                                                {getUpdateIcon(update.update_type)}
+                                            </div>
+                                            <div className="w-0.5 flex-1 bg-gray-200 mt-1" />
+                                        </div>
+
+                                        {/* Content */}
+                                        <div className="flex-1 pb-4">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <span className="font-medium text-sm text-gray-900">
+                                                    {update.vendor?.company_name || 'Vendor'}
+                                                </span>
+                                                <span className="text-xs text-gray-400">
+                                                    {new Date(update.created_at).toLocaleTimeString('en-IN', {
+                                                        hour: '2-digit', minute: '2-digit'
+                                                    })}
+                                                </span>
+                                            </div>
+
+                                            {update.status_tag && (
+                                                <Badge variant="outline" className="mb-1 text-xs">
+                                                    {getStatusIcon(update.status_tag)} {update.status_tag.replace('_', ' ')}
+                                                </Badge>
+                                            )}
+
+                                            {update.message && (
+                                                <p className="text-sm text-gray-600">{update.message}</p>
+                                            )}
+
+                                            {update.photo_url && (
+                                                <div className="mt-2 rounded-lg overflow-hidden border max-w-[300px]">
+                                                    <img
+                                                        src={update.photo_url}
+                                                        alt={update.message || 'Vendor photo'}
+                                                        className="w-full h-auto object-cover"
+                                                        onError={(e) => {
+                                                            // If image fails to load, show placeholder
+                                                            const target = e.target as HTMLImageElement
+                                                            target.style.display = 'none'
+                                                        }}
+                                                    />
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </CardContent>
+                </Card>
             </div>
 
-            {/* Delayed Items Alert */}
-            {delayedItems.length > 0 && (
+            {/* Issues Alert */}
+            {updates.filter(u => u.status_tag === 'issue').length > 0 && (
                 <Card className="border-red-300 bg-red-50">
                     <CardHeader className="pb-3">
                         <CardTitle className="text-lg text-red-700 flex items-center gap-2">
                             <AlertTriangle className="w-5 h-5" />
-                            Delayed Items - Needs Attention
+                            Issues Reported
                         </CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-2">
-                        {delayedItems.map(item => (
-                            <div key={item.id} className="flex items-center gap-3 p-3 bg-white rounded-lg border border-red-200">
-                                <div className="text-center min-w-[50px]">
-                                    <p className="font-mono font-bold text-red-600">{item.startTime}</p>
-                                </div>
+                        {updates.filter(u => u.status_tag === 'issue').map(issue => (
+                            <div key={issue.id} className="flex items-center gap-3 p-3 bg-white rounded-lg border border-red-200">
                                 <div className="flex-1">
-                                    <p className="font-medium">{item.title}</p>
-                                    <p className="text-sm text-red-500">{item.owner} - Expected at {item.startTime}</p>
+                                    <p className="font-medium">{issue.vendor?.company_name || 'Vendor'}</p>
+                                    <p className="text-sm text-red-600">{issue.message}</p>
                                 </div>
-                                <Button
-                                    size="sm"
-                                    className="bg-green-500 hover:bg-green-600"
-                                    onClick={() => handleStatusChange(item.id, 'completed')}
-                                >
-                                    Mark Done
-                                </Button>
+                                <span className="text-xs text-gray-400">
+                                    {new Date(issue.created_at).toLocaleTimeString('en-IN', {
+                                        hour: '2-digit', minute: '2-digit'
+                                    })}
+                                </span>
                             </div>
                         ))}
                     </CardContent>

@@ -73,6 +73,6 @@ async function run() {
 // Actually, I can use the `postgres` library if installed?
 // `npx tsx` environment.
 // Let's check package.json for `pg` or `postgres`.
-`;
 
 run();
+

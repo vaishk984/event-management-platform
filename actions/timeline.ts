@@ -145,21 +145,38 @@ export async function deleteTimelineItem(id: string, eventId: string) {
     return { success: true }
 }
 
+export async function deleteEventFunction(id: string, eventId: string) {
+    const supabase = await createClient()
+    const { error } = await supabase.from('event_functions').delete().eq('id', id)
+
+    if (error) return { error: 'Failed to delete event function' }
+
+    revalidatePath(`/planner/events/${eventId}/timeline`)
+    return { success: true }
+}
+
 export async function updateTimelineItem(formData: FormData) {
     try {
         const supabase = await createClient()
-        const rawData = {
-            id: formData.get('id'),
-            title: formData.get('title'),
-            description: formData.get('description'),
-            startTime: formData.get('startTime'),
-            endTime: formData.get('endTime') || null,
-            location: formData.get('location'),
-            status: formData.get('status'),
-            vendorId: formData.get('vendorId') || null,
-        }
+        const id = formData.get('id') as string
+        const eventId = formData.get('eventId') as string | null
 
-        const { id, ...updates } = rawData
+        const updates: Record<string, any> = {}
+        const title = formData.get('title')
+        const description = formData.get('description')
+        const startTime = formData.get('startTime')
+        const endTime = formData.get('endTime')
+        const location = formData.get('location')
+        const status = formData.get('status')
+        const vendorId = formData.get('vendorId')
+
+        if (title !== null) updates.title = title
+        if (description !== null) updates.description = description
+        if (startTime !== null) updates.start_time = startTime
+        if (endTime !== null) updates.end_time = endTime || null
+        if (location !== null) updates.location = location
+        if (status !== null) updates.status = status
+        if (vendorId !== null) updates.vendor_id = vendorId || null
 
         const { error } = await supabase
             .from('timeline_items')
@@ -168,8 +185,9 @@ export async function updateTimelineItem(formData: FormData) {
 
         if (error) throw error
 
-        // We don't know eventId easily here unless passed, assume revalidation happens via router.refresh() 
-        // or we fetch eventId first. Better to return success.
+        if (eventId) {
+            revalidatePath(`/planner/events/${eventId}/timeline`)
+        }
         return { success: true }
     } catch (error) {
         console.error(error)

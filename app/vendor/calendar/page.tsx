@@ -23,26 +23,34 @@ export default async function VendorCalendarPage() {
     const activeBookings = bookingRequests.filter(b => b.status !== 'declined')
 
     activeBookings.forEach(booking => {
-        // Use eventDate which is standard in our domain
-        const startDateStr = booking.eventDate || new Date().toISOString()
-        // Use eventEndDate if available, otherwise default to startDate
-        const endDateStr = booking.eventEndDate || startDateStr
+        // Use eventDate from the joined event data
+        const startDateStr = booking.eventDate
+        const endDateStr = booking.eventEndDate
 
-        const start = new Date(startDateStr)
-        const end = new Date(endDateStr)
-
-        // Safety check for invalid dates
-        if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        // Skip if no valid start date
+        if (!startDateStr || startDateStr === '') {
             return
         }
 
-        // Iterate from start to end date
-        // Create a new date object for iteration to avoid reference issues
+        const start = new Date(startDateStr)
+
+        // Safety check for invalid start date
+        if (isNaN(start.getTime())) {
+            return
+        }
+
+        // If there's a valid end date, show on the range of actual event days
+        // Otherwise just show on the single event date
+        const end = (endDateStr && !isNaN(new Date(endDateStr).getTime()))
+            ? new Date(endDateStr)
+            : new Date(start)
+
+        // Iterate from start to end date (actual event dates only)
         for (let dt = new Date(start); dt <= end; dt.setDate(dt.getDate() + 1)) {
             const dateStr = dt.toISOString().split('T')[0]
 
             events.push({
-                id: `${booking.id}-${dateStr}`, // Unique ID for each day segment
+                id: `${booking.id}-${dateStr}`,
                 date: dateStr,
                 title: booking.eventName || `Event ${booking.id.slice(0, 4)}`,
                 venue: booking.venue || 'TBD',

@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
     Home, Calendar, User, Briefcase, IndianRupee, Settings, LogOut,
-    ChevronLeft, ChevronRight, Bell, Camera
+    ChevronLeft, ChevronRight, Bell, Camera, Zap
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -28,6 +28,7 @@ export function VendorLayoutWrapper({
         { icon: Home, label: 'Dashboard', href: '/vendor' },
         { icon: Briefcase, label: 'Bookings', href: '/vendor/bookings' },
         { icon: Calendar, label: 'Calendar', href: '/vendor/calendar' },
+        { icon: Zap, label: 'Event Day', href: '/vendor/event-day' },
         { icon: IndianRupee, label: 'Earnings', href: '/vendor/earnings' },
         { icon: User, label: 'Profile', href: '/vendor/profile' },
     ]

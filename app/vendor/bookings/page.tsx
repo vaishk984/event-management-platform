@@ -101,7 +101,7 @@ export default function VendorBookingsPage() {
 
     const counts = {
         all: bookings.length,
-        pending: bookings.filter(b => b.status === 'pending').length,
+        pending: bookings.filter(b => b.status === 'pending' || b.status === 'draft' || b.status === 'quote_requested').length,
         accepted: bookings.filter(b => b.status === 'accepted').length,
         declined: bookings.filter(b => b.status === 'declined').length,
     }
@@ -247,7 +247,7 @@ export default function VendorBookingsPage() {
 
                                     {/* Actions */}
                                     <div className="flex flex-col gap-2 ml-4">
-                                        {booking.status === 'pending' && (
+                                        {(booking.status === 'pending' || booking.status === 'draft' || booking.status === 'quote_requested') && (
                                             <>
                                                 <Button
                                                     size="sm"

@@ -8,10 +8,11 @@ import {
     FileText, Download, Send, Printer,
     IndianRupee, Calendar, User, Building2,
     CheckCircle2, Clock, AlertCircle, Search,
-    CreditCard, Receipt, Loader2
+    CreditCard, Receipt, Loader2, Plus, X, Trash2
 } from 'lucide-react'
-import { getInvoices, updateInvoiceStatus } from '@/actions/invoices-tasks'
+import { getInvoices, updateInvoiceStatus, createInvoice } from '@/actions/invoices-tasks'
 import { toast } from 'sonner'
+import { createClient } from '@/lib/supabase/client'
 
 function getStatusColor(status: string) {
     switch (status) {
@@ -41,6 +42,7 @@ export default function InvoicesPage() {
     const [selectedInvoice, setSelectedInvoice] = useState<any>(null)
     const [searchQuery, setSearchQuery] = useState('')
     const [sending, setSending] = useState(false)
+    const [showCreateDialog, setShowCreateDialog] = useState(false)
 
     useEffect(() => {
         fetchInvoices()
@@ -106,7 +108,22 @@ export default function InvoicesPage() {
                     <h1 className="text-3xl font-bold text-gray-900">Invoices</h1>
                     <p className="text-gray-500">Manage client invoices and payments</p>
                 </div>
+                <Button
+                    className="bg-indigo-600 hover:bg-indigo-700 gap-2"
+                    onClick={() => setShowCreateDialog(true)}
+                >
+                    <Plus className="w-4 h-4" />
+                    Create Invoice
+                </Button>
             </div>
+
+            {/* Create Invoice Dialog */}
+            {showCreateDialog && (
+                <CreateInvoiceDialog
+                    onClose={() => setShowCreateDialog(false)}
+                    onCreated={() => { setShowCreateDialog(false); fetchInvoices() }}
+                />
+            )}
 
             {/* Stats Cards */}
             <div className="grid grid-cols-4 gap-4">
@@ -353,5 +370,219 @@ export default function InvoicesPage() {
                 </div>
             </div>
         </div>
+    )
+}
+
+// ============================================================================
+// CREATE INVOICE DIALOG
+// ============================================================================
+
+function CreateInvoiceDialog({
+    onClose,
+    onCreated
+}: {
+    onClose: () => void
+    onCreated: () => void
+}) {
+    const [events, setEvents] = useState<any[]>([])
+    const [selectedEventId, setSelectedEventId] = useState('')
+    const [clientName, setClientName] = useState('')
+    const [clientEmail, setClientEmail] = useState('')
+    const [dueDate, setDueDate] = useState('')
+    const [items, setItems] = useState<{ description: string; quantity: number; rate: number }[]>([
+        { description: '', quantity: 1, rate: 0 }
+    ])
+    const [loadingEvents, setLoadingEvents] = useState(true)
+    const [creating, setCreating] = useState(false)
+
+    useEffect(() => {
+        loadEvents()
+    }, [])
+
+    useEffect(() => {
+        if (selectedEventId) {
+            loadVendorItems(selectedEventId)
+        }
+    }, [selectedEventId])
+
+    const loadEvents = async () => {
+        const supabase = createClient()
+        const { data } = await supabase
+            .from('events')
+            .select('id, name, client_name, client_email, date')
+            .order('created_at', { ascending: false })
+        setEvents(data || [])
+        if (data && data.length > 0) {
+            setSelectedEventId(data[0].id)
+            setClientName(data[0].client_name || '')
+            setClientEmail(data[0].client_email || '')
+        }
+        setLoadingEvents(false)
+    }
+
+    const loadVendorItems = async (eventId: string) => {
+        const supabase = createClient()
+        const { data: bookings } = await supabase
+            .from('booking_requests')
+            .select('service, budget, quoted_amount, vendors(company_name)')
+            .eq('event_id', eventId)
+            .in('status', ['accepted', 'confirmed'])
+
+        if (bookings && bookings.length > 0) {
+            const autoItems = bookings.map((b: any) => ({
+                description: `${(b as any).vendors?.company_name || 'Vendor'} — ${b.service || 'Service'}`,
+                quantity: 1,
+                rate: b.quoted_amount || b.budget || 0
+            }))
+            setItems(autoItems)
+        }
+
+        // Auto-fill client info from event
+        const evt = events.find(e => e.id === eventId)
+        if (evt) {
+            if (evt.client_name) setClientName(evt.client_name)
+            if (evt.client_email) setClientEmail(evt.client_email)
+        }
+    }
+
+    const addItem = () => setItems([...items, { description: '', quantity: 1, rate: 0 }])
+    const removeItem = (idx: number) => setItems(items.filter((_, i) => i !== idx))
+    const updateItem = (idx: number, field: string, value: any) => {
+        const updated = [...items]
+            ; (updated[idx] as any)[field] = value
+        setItems(updated)
+    }
+
+    const subtotal = items.reduce((sum, i) => sum + (i.quantity * i.rate), 0)
+
+    const handleSubmit = async () => {
+        if (!selectedEventId || !clientName.trim() || items.length === 0) {
+            toast.error('Event, client name, and at least one item are required')
+            return
+        }
+
+        setCreating(true)
+        const result = await createInvoice({
+            eventId: selectedEventId,
+            clientName: clientName.trim(),
+            clientEmail: clientEmail.trim(),
+            dueDate: dueDate || undefined,
+            items: items.filter(i => i.description.trim()),
+        })
+
+        if (result.error) {
+            toast.error(result.error)
+        } else {
+            toast.success('Invoice created!')
+            onCreated()
+        }
+        setCreating(false)
+    }
+
+    if (loadingEvents) {
+        return (
+            <Card className="border-indigo-200">
+                <CardContent className="p-6 flex items-center justify-center">
+                    <Loader2 className="w-6 h-6 animate-spin text-indigo-500" />
+                </CardContent>
+            </Card>
+        )
+    }
+
+    return (
+        <Card className="border-indigo-200 shadow-lg">
+            <CardHeader className="pb-3 flex flex-row items-center justify-between">
+                <CardTitle className="text-lg">Create Invoice</CardTitle>
+                <Button variant="ghost" size="icon" onClick={onClose}>
+                    <X className="w-4 h-4" />
+                </Button>
+            </CardHeader>
+            <CardContent>
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label className="text-sm font-medium text-gray-700 mb-1 block">Event *</label>
+                        <select
+                            className="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-indigo-200 outline-none"
+                            value={selectedEventId}
+                            onChange={e => setSelectedEventId(e.target.value)}
+                        >
+                            {events.map(evt => (
+                                <option key={evt.id} value={evt.id}>{evt.name}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="text-sm font-medium text-gray-700 mb-1 block">Client Name *</label>
+                        <Input value={clientName} onChange={e => setClientName(e.target.value)} placeholder="Client name" />
+                    </div>
+                    <div>
+                        <label className="text-sm font-medium text-gray-700 mb-1 block">Client Email</label>
+                        <Input value={clientEmail} onChange={e => setClientEmail(e.target.value)} placeholder="client@email.com" />
+                    </div>
+                    <div>
+                        <label className="text-sm font-medium text-gray-700 mb-1 block">Due Date</label>
+                        <Input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
+                    </div>
+                </div>
+
+                {/* Line Items */}
+                <div className="mb-4">
+                    <div className="flex items-center justify-between mb-2">
+                        <label className="text-sm font-medium text-gray-700">Line Items</label>
+                        <Button variant="outline" size="sm" onClick={addItem}>
+                            <Plus className="w-3 h-3 mr-1" /> Add Item
+                        </Button>
+                    </div>
+                    <div className="space-y-2">
+                        {items.map((item, idx) => (
+                            <div key={idx} className="flex gap-2 items-center">
+                                <Input
+                                    className="flex-1"
+                                    value={item.description}
+                                    onChange={e => updateItem(idx, 'description', e.target.value)}
+                                    placeholder="Description"
+                                />
+                                <Input
+                                    className="w-20"
+                                    type="number"
+                                    value={item.quantity}
+                                    onChange={e => updateItem(idx, 'quantity', Number(e.target.value))}
+                                    placeholder="Qty"
+                                />
+                                <Input
+                                    className="w-28"
+                                    type="number"
+                                    value={item.rate}
+                                    onChange={e => updateItem(idx, 'rate', Number(e.target.value))}
+                                    placeholder="Rate (₹)"
+                                />
+                                <span className="text-sm font-medium w-24 text-right">
+                                    ₹{(item.quantity * item.rate).toLocaleString('en-IN')}
+                                </span>
+                                {items.length > 1 && (
+                                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => removeItem(idx)}>
+                                        <Trash2 className="w-3 h-3 text-red-500" />
+                                    </Button>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                    <div className="flex justify-end mt-2 text-sm font-semibold">
+                        Subtotal: ₹{subtotal.toLocaleString('en-IN')}
+                    </div>
+                </div>
+
+                <div className="flex justify-end gap-3">
+                    <Button variant="outline" onClick={onClose}>Cancel</Button>
+                    <Button
+                        className="bg-indigo-600 hover:bg-indigo-700"
+                        onClick={handleSubmit}
+                        disabled={creating || !clientName.trim() || !selectedEventId}
+                    >
+                        {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Create Invoice'}
+                    </Button>
+                </div>
+            </CardContent>
+        </Card>
     )
 }

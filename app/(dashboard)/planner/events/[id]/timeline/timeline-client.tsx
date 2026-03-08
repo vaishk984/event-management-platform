@@ -4,8 +4,16 @@ import { useState } from 'react'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { format } from 'date-fns'
-import { CalendarDays } from 'lucide-react'
-import { reorderTimelineItems } from '@/actions/timeline'
+import { CalendarDays, MoreVertical, Loader2, Trash2 } from 'lucide-react'
+import { reorderTimelineItems, deleteEventFunction } from '@/actions/timeline'
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Button } from '@/components/ui/button'
+import { useToast } from '@/components/ui/use-toast'
 import { TimelineItemCard } from './timeline-item-card'
 import { AddTimelineItemDialog } from './add-timeline-item-dialog'
 import { AddFunctionDialog } from './add-function-dialog'
@@ -20,6 +28,8 @@ interface TimelineClientProps {
 
 export function TimelineClient({ eventId, items: initialItems, functions, vendors }: TimelineClientProps) {
     const [items, setItems] = useState(initialItems)
+    const [deletingId, setDeletingId] = useState<string | null>(null)
+    const { toast } = useToast()
 
     const sensors = useSensors(
         useSensor(PointerSensor),
@@ -73,6 +83,27 @@ export function TimelineClient({ eventId, items: initialItems, functions, vendor
         }
     }
 
+    async function handleDeleteFunction(functionId: string) {
+        if (!confirm('Are you sure you want to delete this event function? All timeline items inside it will be moved to Unassigned.')) return
+
+        setDeletingId(functionId)
+        const result = await deleteEventFunction(functionId, eventId)
+        setDeletingId(null)
+
+        if (result.error) {
+            toast({
+                title: 'Error',
+                description: result.error,
+                variant: 'destructive'
+            })
+        } else {
+            toast({
+                title: 'Success',
+                description: 'Event function deleted successfully'
+            })
+        }
+    }
+
     return (
         <div className="space-y-8">
             <div className="flex justify-between items-center">
@@ -93,13 +124,40 @@ export function TimelineClient({ eventId, items: initialItems, functions, vendor
                     {groupedItems.map((group) => (
                         <div key={group.id} className="space-y-4">
                             {/* Group Header */}
-                            <div className="flex items-center gap-2 border-b pb-2">
-                                <CalendarDays className="w-5 h-5 text-indigo-600" />
-                                <h3 className="font-medium text-lg text-gray-900">{group.name}</h3>
-                                {group.date && (
-                                    <span className="text-sm text-gray-500">
-                                        {format(new Date(group.date), 'EEEE, MMMM d, yyyy')}
-                                    </span>
+                            <div className="flex justify-between items-center border-b pb-2">
+                                <div className="flex items-center gap-2">
+                                    <CalendarDays className="w-5 h-5 text-indigo-600" />
+                                    <h3 className="font-medium text-lg text-gray-900">{group.name}</h3>
+                                    {group.date && (
+                                        <span className="text-sm text-gray-500">
+                                            {format(new Date(group.date), 'EEEE, MMMM d, yyyy')}
+                                        </span>
+                                    )}
+                                </div>
+                                {group.id !== 'unassigned' && (
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                            <Button variant="ghost" size="icon" className="h-8 w-8 text-gray-500">
+                                                {deletingId === group.id ? (
+                                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                                ) : (
+                                                    <MoreVertical className="h-4 w-4" />
+                                                )}
+                                            </Button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent align="end">
+                                            <DropdownMenuItem
+                                                className="text-red-600 focus:text-red-600 cursor-pointer flex justify-between"
+                                                onSelect={(e: Event) => {
+                                                    e.preventDefault()
+                                                    handleDeleteFunction(group.id)
+                                                }}
+                                            >
+                                                Delete Function
+                                                <Trash2 className="h-4 w-4 ml-2" />
+                                            </DropdownMenuItem>
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
                                 )}
                             </div>
 
@@ -115,7 +173,7 @@ export function TimelineClient({ eventId, items: initialItems, functions, vendor
                                         </div>
                                     ) : (
                                         group.items.map((item: any) => (
-                                            <TimelineItemCard key={item.id} item={item} />
+                                            <TimelineItemCard key={item.id} item={item} eventId={eventId} />
                                         ))
                                     )}
                                 </div>

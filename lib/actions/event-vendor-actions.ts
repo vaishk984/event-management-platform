@@ -52,6 +52,9 @@ export async function addVendorToEvent(
             const { createClient } = await import('@/lib/supabase/server');
             const supabase = await createClient();
 
+            // Get current user (planner)
+            const { data: { user } } = await supabase.auth.getUser();
+
             // Check if a booking_request already exists for this vendor+event
             const { count } = await supabase
                 .from('booking_requests')
@@ -65,6 +68,12 @@ export async function addVendorToEvent(
                     .insert({
                         event_id: eventId,
                         vendor_id: vendorId,
+                        planner_id: user?.id || null,
+                        event_name: event.name || 'Event',
+                        event_date: event.date || new Date().toISOString().split('T')[0],
+                        city: event.city || null,
+                        venue: event.venueName || null,
+                        guest_count: event.guestCount || null,
                         service: category,
                         status: 'draft',
                         budget: price || 0,

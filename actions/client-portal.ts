@@ -3,531 +3,616 @@
 import { createClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 
-// Public Actions - No user authentication check (handled by RPC and Security Definer)
+// ============================================================================
+// TOKEN VALIDATION
+// ============================================================================
 
-export async function getPublicEvent(token: string) {
+/**
+ * Validate a client portal token and return the event
+ */
+export async function getEventByClientToken(token: string) {
     const supabase = await createClient()
-    const { data, error } = await supabase.rpc('get_public_event', { token_input: token })
 
-    if (error) {
-        console.error('getPublicEvent error:', error)
-        return { error: 'Failed to find event' }
-    }
-
-    // RPC 'get_public_event' returns SETOF events, so it's an array. Take first.
-    if (!data || data.length === 0) {
-        return { error: 'Invalid token or event not found' }
-    }
-
-    return { data: data[0] }
-}
-
-export async function getPublicTimeline(token: string) {
-    const supabase = await createClient()
-    const { data: timeline, error: timelineError } = await supabase.rpc('get_public_timeline', { token_input: token })
-    const { data: functions, error: functionsError } = await supabase.rpc('get_public_functions', { token_input: token })
-
-    if (timelineError || functionsError) {
-        console.error('getPublicTimeline error:', timelineError || functionsError)
-        return { items: [], functions: [] }
-    }
-
-
-    return {
-        items: timeline || [],
-        functions: functions || []
-    }
-}
-
-export async function getPublicBudget(token: string) {
-    const supabase = await createClient()
-    const { data, error } = await supabase.rpc('get_public_budget', { token_input: token })
-
-    if (error) {
-        console.error('getPublicBudget error:', error)
-        return { totalEstimated: 0, totalSpent: 0, totalPaid: 0 }
-    }
-
-    // RPC returns a row
-    return data && data[0] ? data[0] : { totalEstimated: 0, totalSpent: 0, totalPaid: 0 }
-}
-
-export async function updateProposalStatus(token: string, status: 'approved' | 'declined' | 'changes_requested', feedback?: string) {
-    const supabase = await createClient()
-    const { data, error } = await supabase.rpc('update_proposal_status', {
-        token_input: token,
-        status_input: status,
-        feedback_input: feedback || null
-    })
-
-    if (error) {
-        console.error('updateProposalStatus error:', error)
-        return { error: 'Failed to update status' }
-    }
-
-    // Create notification for the planner
-    try {
-        const { data: event } = await supabase
-            .from('events')
-            .select('id, planner_id, name, client_name')
-            .eq('public_token', token)
-            .single()
-
-        if (event?.planner_id) {
-            const clientName = event.client_name || 'Your client'
-            const eventName = event.name || 'an event'
-
-            const notifTitle = status === 'approved'
-                ? '✅ Proposal Approved!'
-                : status === 'changes_requested'
-                    ? '📝 Changes Requested'
-                    : '❌ Proposal Declined'
-
-            const notifMessage = status === 'approved'
-                ? `${clientName} has approved the proposal for "${eventName}". You can now proceed with vendor confirmations.`
-                : status === 'changes_requested'
-                    ? `${clientName} has requested changes to the proposal for "${eventName}".${feedback ? ` Feedback: "${feedback}"` : ''}`
-                    : `${clientName} has declined the proposal for "${eventName}".`
-
-            await supabase.from('notifications').insert({
-                user_id: event.planner_id,
-                event_id: event.id,
-                type: status === 'approved' ? 'proposal_approved' : 'proposal_changes_requested',
-                title: notifTitle,
-                message: notifMessage,
-                link: `/planner/events/${event.id}/client`,
-            })
-        }
-    } catch (e) {
-        console.error('Error creating notification:', e)
-        // Don't fail the whole request if notification fails
-    }
-
-    revalidatePath(`/proposal/${token}`)
-    return { success: true }
-}
-
-export async function generateProposalToken(eventId: string) {
-    const supabase = await createClient()
-    const token = `prop_${Date.now().toString(36)}_${Math.random().toString(36).substr(2, 6)}`
-
-    const { error } = await supabase
+    const { data: event, error } = await supabase
         .from('events')
-        .update({
-            public_token: token,
-            proposal_status: 'sent', // Update status too
-            updated_at: new Date().toISOString()
-        })
-        .eq('id', eventId)
-
-    if (error) {
-        console.error('Error generating token:', error)
-        return { error: 'Failed to generate proposal link' }
-    }
-
-    return { token }
-}
-
-export async function getPublicProposalDetails(token: string) {
-    const supabase = await createClient()
-
-    // 1. Get Event from token (no join — FK hint causes PGRST200)
-    const { data: events, error: eventError } = await supabase
-        .from('events')
-        .select('*')
-        .eq('public_token', token)
+        .select(`
+            id, name, date, end_date, venue_name, venue_address, type,
+            status, guest_count, budget_max,
+            client_name, client_email, client_phone,
+            planner_id
+        `)
+        .eq('client_token', token)
         .single()
 
-    if (eventError || !events) {
-        console.error('Error fetching proposal event:', eventError)
-        return { error: 'Proposal not found' }
+    if (error || !event) {
+        return { error: 'Invalid or expired link' }
     }
 
-    // 2. Fetch planner profile separately using planner_id
-    const { data: planner } = await supabase
-        .from('user_profiles')
-        .select('full_name, email, phone_number, company_name')
-        .eq('id', events.planner_id)
-        .maybeSingle()
+    return { data: event }
+}
 
-    const eventId = events.id
+// ============================================================================
+// ANONYMIZED EVENT DATA FOR CLIENT
+// ============================================================================
 
-    // 3. Get Booking Requests (no FK join — it causes PGRST200)
-    const { data: requests, error: requestsError } = await supabase
+/**
+ * Get service categories with status (no vendor names)
+ */
+export async function getClientServices(token: string) {
+    const supabase = await createClient()
+
+    // Validate token
+    const { data: event, error } = await supabase
+        .from('events')
+        .select('id')
+        .eq('client_token', token)
+        .single()
+
+    if (error || !event) return { error: 'Invalid link', data: [] }
+
+    // Get booking requests without vendor info
+    const { data: bookings } = await supabase
         .from('booking_requests')
-        .select('*')
-        .eq('event_id', eventId)
+        .select('id, service, status, budget, quoted_amount')
+        .eq('event_id', event.id)
         .neq('status', 'declined')
 
-    if (requestsError) {
-        console.error('Error fetching booking requests:', requestsError)
+    // Map to anonymized service categories
+    const serviceLabels: Record<string, string> = {
+        'catering': 'Culinary Experience',
+        'photography': 'Memory Capture',
+        'videography': 'Film & Highlights',
+        'decor': 'Ambience Design',
+        'decoration': 'Ambience Design',
+        'venue': 'Venue & Spaces',
+        'entertainment': 'Entertainment',
+        'music': 'Music & DJ',
+        'dj': 'Music & DJ',
+        'makeup': 'Styling & Beauty',
+        'mehendi': 'Mehendi Art',
+        'transport': 'Transport & Logistics',
+        'invitation': 'Invitations & Stationery',
+        'lighting': 'Lighting Design',
+        'florist': 'Floral Design',
+        'cake': 'Cake & Desserts',
     }
 
-    // 3b. Also get vendors from vendor_assignments (added via Showroom)
-    const { data: assignments, error: assignmentsError } = await supabase
-        .from('vendor_assignments')
-        .select('*, vendor:vendor_id(id, company_name, category)')
-        .eq('event_id', eventId)
+    const services = (bookings || []).map(b => ({
+        id: b.id,
+        category: serviceLabels[(b.service || '').toLowerCase()] || 'Event Service',
+        status: b.status === 'accepted' || b.status === 'confirmed' ? 'confirmed' :
+            b.status === 'pending' ? 'in_progress' : 'pending',
+        statusLabel: b.status === 'accepted' || b.status === 'confirmed' ? '✅ Confirmed' :
+            b.status === 'pending' ? '🔄 In Progress' : '⏳ Pending',
+    }))
 
-    if (assignmentsError) {
-        console.error('Error fetching vendor assignments:', assignmentsError)
-    }
+    return { data: services }
+}
 
-    // 4. Fetch vendor names separately for each booking request
-    const vendorIds = [...new Set([
-        ...(requests || []).map(r => r.vendor_id),
-        ...(assignments || []).map((a: any) => a.vendor_id)
-    ].filter(Boolean))]
+// ============================================================================
+// ANONYMIZED D-DAY UPDATES
+// ============================================================================
 
-    let vendorMap: Record<string, { name: string, start_price: number }> = {}
-    if (vendorIds.length > 0) {
-        const { data: vendors, error: vendorError } = await supabase
-            .from('vendors')
-            .select('id, company_name, start_price')
-            .in('id', vendorIds)
-        if (vendorError) {
-            console.error('Error fetching vendors:', vendorError)
-        }
-        for (const v of (vendors || [])) {
-            vendorMap[v.id] = { name: v.company_name, start_price: v.start_price || 0 }
-        }
-    }
+/**
+ * Get D-day updates with all vendor info stripped
+ */
+export async function getClientUpdates(token: string) {
+    const supabase = await createClient()
 
-    // 5. Get Budget Items
-    const { data: budgetItems, error: budgetError } = await supabase
-        .from('budget_items')
-        .select('*')
-        .eq('event_id', eventId)
+    const { data: event, error } = await supabase
+        .from('events')
+        .select('id')
+        .eq('client_token', token)
+        .single()
 
-    if (budgetError) {
-        console.error('Error fetching budget items:', budgetError)
-    }
+    if (error || !event) return { error: 'Invalid link', data: [] }
 
-    // 6. Get Timeline Items
-    const { data: timelineItems, error: timelineError } = await supabase
-        .from('timeline_items')
-        .select('*')
-        .eq('event_id', eventId)
-        .order('start_time', { ascending: true })
+    const { data: updates } = await supabase
+        .from('vendor_updates')
+        .select('id, update_type, message, photo_url, status_tag, created_at')
+        .eq('event_id', event.id)
+        .order('created_at', { ascending: false })
 
-    if (timelineError) {
-        console.error('Error fetching timeline:', timelineError)
-    }
+    // Anonymize — replace any vendor-specific info
+    const anonymized = (updates || []).map(u => ({
+        id: u.id,
+        type: u.update_type,
+        message: u.message,
+        photoUrl: u.photo_url,
+        statusTag: u.status_tag,
+        createdAt: u.created_at,
+        sender: 'Your Planning Team',  // Always anonymized
+    }))
 
-    // 6b. Get Event Functions (top-level schedule groups like "Graduation ceremony")
-    const { data: eventFunctions, error: funcError } = await supabase
-        .from('event_functions')
-        .select('*')
-        .eq('event_id', eventId)
-        .order('date', { ascending: true })
-        .order('start_time', { ascending: true })
+    return { data: anonymized }
+}
 
-    if (funcError) {
-        console.error('Error fetching event functions:', funcError)
-    }
+/**
+ * Get anonymized arrival progress for D-day
+ */
+export async function getClientDayProgress(token: string) {
+    const supabase = await createClient()
 
-    // Merge booking_requests + vendor_assignments (dedupe by SERVICE CATEGORY)
-    // This prevents duplicate entries (like 2 catering components) if one is assigned and one is a generic request
-    const mergedVendorMap = new Map<string, any>()
+    const { data: event, error } = await supabase
+        .from('events')
+        .select('id')
+        .eq('client_token', token)
+        .single()
 
-    // Add assignments first (showroom vendors)
-    for (const a of (assignments || [])) {
-        const category = ((a as any).vendor?.category || a.vendor_category || 'other').toLowerCase()
-        mergedVendorMap.set(category, {
-            service: category.charAt(0).toUpperCase() + category.slice(1),
-            vendor_id: a.vendor_id,
-            agreed_amount: a.agreed_amount || a.price || 0,
-            quoted_amount: 0,
-            budget: 0,
-            notes: a.notes || '',
-            service_details: '',
-        })
-    }
+    if (error || !event) return { error: 'Invalid link', data: null }
 
-    // Add booking_requests (overwrite if same category)
-    for (const req of (requests || [])) {
-        const category = (req.service || 'other').toLowerCase()
+    // Get arrival-type updates
+    const { data: arrivals } = await supabase
+        .from('vendor_updates')
+        .select('vendor_id, status_tag')
+        .eq('event_id', event.id)
+        .in('status_tag', ['arrived', 'setup_complete', 'completed', 'departed'])
 
-        // If an assignment already exists for this category with a vendor, but the request has NO vendor, skip overwriting.
-        // We want to keep the true vendor assignment over a generic unassigned request.
-        if (!req.vendor_id && mergedVendorMap.has(category) && mergedVendorMap.get(category).vendor_id) {
-            continue
-        }
+    // Get total vendor count
+    const { data: bookings } = await supabase
+        .from('booking_requests')
+        .select('vendor_id')
+        .eq('event_id', event.id)
+        .in('status', ['accepted', 'confirmed'])
 
-        mergedVendorMap.set(category, req)
-    }
-
-    const allVendorEntries = Array.from(mergedVendorMap.values())
-
-    // Map to proposal categories
-    const guestCount = events.guest_count || 0
-    const categories = allVendorEntries.map(req => {
-        const serviceName = req.service?.toLowerCase() || 'other'
-        const isCatering = serviceName.includes('food') || serviceName.includes('cater')
-        const vendorData = vendorMap[req.vendor_id] || { name: 'Vendor TBD', start_price: 0 }
-
-        // Fallback to vendor table's start_price if all booking amounts are 0
-        const unitPrice = req.agreed_amount || req.quoted_amount || req.budget || vendorData.start_price || 0
-        const totalPrice = isCatering && guestCount > 0 ? unitPrice * guestCount : unitPrice
-
-        return {
-            id: serviceName,
-            name: req.service || 'Service',
-            icon: serviceName.includes('photo') ? 'Camera' :
-                isCatering ? 'UtensilsCrossed' :
-                    serviceName.includes('decor') ? 'Sparkles' :
-                        serviceName.includes('venue') ? 'Building2' :
-                            serviceName.includes('transport') ? 'Car' :
-                                serviceName.includes('music') || serviceName.includes('entertain') ? 'Music' :
-                                    'Sparkles',
-            vendor: {
-                name: vendorData.name,
-                rating: 4.8
-            },
-            price: totalPrice,
-            perPlatePrice: isCatering ? unitPrice : null,
-            guestCount: isCatering ? guestCount : null,
-            items: req.service_details ? [req.service_details] : req.notes ? [req.notes] : ['Details to be confirmed']
-        }
-    })
-
-    // Map budget items for the budget section
-    const budget = {
-        items: (budgetItems || []).map(item => ({
-            id: item.id,
-            category: item.category,
-            description: item.description || item.category,
-            estimated: item.estimated_amount || 0,
-            actual: item.actual_amount || 0,
-            paid: item.paid_amount || 0,
-        })),
-        totalEstimated: (budgetItems || []).reduce((sum: number, i: any) => sum + (i.estimated_amount || 0), 0),
-        totalActual: (budgetItems || []).reduce((sum: number, i: any) => sum + (i.actual_amount || 0), 0),
-        totalPaid: (budgetItems || []).reduce((sum: number, i: any) => sum + (i.paid_amount || 0), 0),
-    }
-
-    // Map timeline: use timeline_items if available, otherwise fall back to event_functions
-    let timeline: any[] = []
-
-    if ((timelineItems || []).length > 0) {
-        // Use detailed timeline items
-        timeline = (timelineItems || []).map((item: any) => ({
-            id: item.id,
-            time: item.start_time ? item.start_time.substring(0, 5) : 'TBD',
-            title: item.title,
-            category: 'event',
-            duration: item.duration ? `${item.duration} mins` : '',
-            description: item.description || ''
-        }))
-    } else if ((eventFunctions || []).length > 0) {
-        // Fall back to event functions (top-level schedule)
-        timeline = (eventFunctions || []).map((fn: any) => ({
-            id: fn.id,
-            time: fn.start_time ? fn.start_time.substring(0, 5) : 'TBD',
-            title: fn.name,
-            category: fn.type || 'event',
-            duration: '',
-            description: fn.venue_name ? `Venue: ${fn.venue_name}` : (fn.date ? `Date: ${new Date(fn.date).toLocaleDateString()}` : '')
-        }))
-    }
-
-    if (timeline.length === 0) {
-        timeline.push({ id: 't1', time: 'TBD', title: 'Timeline not yet created', category: 'ceremony', duration: '', description: 'Your planner will add the event schedule here' })
-    }
+    const totalServices = bookings?.length || 0
+    const arrivedVendors = new Set((arrivals || []).map(a => a.vendor_id)).size
 
     return {
-        proposal: {
-            id: events.id,
-            eventName: events.name,
-            eventType: events.type,
-            clientName: events.client_name,
-            date: events.date,
-            venue: events.venue_name,
-            city: events.city,
-            guestCount: events.guest_count,
-            plannerName: planner?.company_name || planner?.full_name || 'Event Planner',
-            plannerPhone: planner?.phone_number || '',
-            plannerEmail: planner?.email || '',
-            validUntil: new Date(new Date(events.updated_at).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            status: events.proposal_status || 'pending',
-            personalMessage: events.notes || 'Here is your event proposal.',
-            postApprovalNote: 'Once approved, your planner will confirm all vendor bookings and share a final detailed plan with you.',
-            categories: categories,
-            timeline: timeline,
-            budget: budget
+        data: {
+            totalServices,
+            arrivedCount: arrivedVendors,
+            progressPercent: totalServices > 0 ? Math.round((arrivedVendors / totalServices) * 100) : 0
         }
     }
 }
 
-// ===== FINAL PROPOSAL (SNAPSHOT) =====
+// ============================================================================
+// CLIENT MESSAGES
+// ============================================================================
 
-export async function sendFinalProposal(eventId: string) {
+/**
+ * Get messages for an event (client ↔ planner)
+ */
+export async function getClientMessages(token: string) {
     const supabase = await createClient()
 
-    // 1. Get the current event to find the preliminary token
-    const { data: event, error: eventError } = await supabase
+    const { data: event, error } = await supabase
         .from('events')
-        .select('*')
-        .eq('id', eventId)
+        .select('id')
+        .eq('client_token', token)
         .single()
 
-    if (eventError || !event) {
-        return { error: 'Event not found' }
-    }
+    if (error || !event) return { error: 'Invalid link', data: [] }
 
-    if (!event.public_token) {
-        return { error: 'Generate a preliminary proposal link first' }
-    }
+    const { data: messages } = await supabase
+        .from('client_messages')
+        .select('*')
+        .eq('event_id', event.id)
+        .order('created_at', { ascending: true })
 
-    // 2. Build the snapshot by calling getPublicProposalDetails
-    const proposalResult = await getPublicProposalDetails(event.public_token)
-    if ('error' in proposalResult) {
-        return { error: 'Failed to capture proposal data' }
-    }
+    return { data: messages || [] }
+}
 
-    // 3. Generate a unique token for the final proposal
-    const finalToken = `final_${Date.now().toString(36)}_${Math.random().toString(36).substr(2, 6)}`
+/**
+ * Send a message from client
+ */
+export async function sendClientMessage(token: string, message: string) {
+    const supabase = await createClient()
 
-    // 4. Get version number
-    const { count } = await supabase
-        .from('proposal_snapshots')
-        .select('*', { count: 'exact', head: true })
-        .eq('event_id', eventId)
+    const { data: event, error } = await supabase
+        .from('events')
+        .select('id')
+        .eq('client_token', token)
+        .single()
 
-    const version = (count || 0) + 1
+    if (error || !event) return { error: 'Invalid link' }
 
-    // 5. Store the snapshot
     const { error: insertError } = await supabase
-        .from('proposal_snapshots')
+        .from('client_messages')
         .insert({
-            event_id: eventId,
-            version: version,
-            snapshot_data: proposalResult.proposal,
-            token: finalToken,
-            status: 'sent',
+            event_id: event.id,
+            sender_type: 'client',
+            message: message.trim(),
         })
 
     if (insertError) {
-        console.error('Error creating proposal snapshot:', insertError)
-        return { error: 'Failed to save final proposal' }
+        console.error('Error sending message:', insertError)
+        return { error: 'Failed to send message' }
     }
 
-    // 6. Update event with final token
-    await supabase
+    return { success: true }
+}
+
+/**
+ * Send a message from planner
+ */
+export async function sendPlannerMessage(eventId: string, message: string) {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return { error: 'Unauthorized' }
+
+    const { error } = await supabase
+        .from('client_messages')
+        .insert({
+            event_id: eventId,
+            sender_type: 'planner',
+            message: message.trim(),
+        })
+
+    if (error) {
+        console.error('Error sending planner message:', error)
+        return { error: 'Failed to send message' }
+    }
+
+    revalidatePath(`/planner/events/${eventId}`)
+    return { success: true }
+}
+
+// ============================================================================
+// GENERATE CLIENT TOKEN (Planner side)
+// ============================================================================
+
+/**
+ * Generate or retrieve the client portal token for an event
+ */
+export async function getOrCreateClientToken(eventId: string) {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return { error: 'Unauthorized' }
+
+    // First check if token already exists
+    const { data: event } = await supabase
+        .from('events')
+        .select('client_token')
+        .eq('id', eventId)
+        .eq('planner_id', user.id)
+        .single()
+
+    if (!event) return { error: 'Event not found' }
+
+    if (event.client_token) {
+        return { token: event.client_token }
+    }
+
+    // Generate new token
+    const { data: updated, error } = await supabase
+        .from('events')
+        .update({ client_token: crypto.randomUUID() })
+        .eq('id', eventId)
+        .eq('planner_id', user.id)
+        .select('client_token')
+        .single()
+
+    if (error || !updated) {
+        return { error: 'Failed to generate link' }
+    }
+
+    return { token: updated.client_token }
+}
+
+// ============================================================================
+// SEND FINAL PROPOSAL (Frozen Snapshot)
+// ============================================================================
+
+/**
+ * Generate a final proposal snapshot token for the event
+ */
+export async function sendFinalProposal(eventId: string) {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return { error: 'Unauthorized' }
+
+    const finalToken = crypto.randomUUID()
+
+    // Get current version count
+    const { data: event } = await supabase
+        .from('events')
+        .select('proposal_version')
+        .eq('id', eventId)
+        .eq('planner_id', user.id)
+        .single()
+
+    const newVersion = ((event as any)?.proposal_version || 0) + 1
+
+    const { error } = await supabase
         .from('events')
         .update({
             final_proposal_token: finalToken,
-            proposal_status: 'final_sent',
+            proposal_status: 'final',
+            proposal_version: newVersion,
         })
         .eq('id', eventId)
+        .eq('planner_id', user.id)
+
+    if (error) {
+        console.error('Error sending final proposal:', error)
+        return { error: 'Failed to send final proposal' }
+    }
 
     revalidatePath(`/planner/events/${eventId}/client`)
-    return { success: true, token: finalToken, version }
+    return { success: true, token: finalToken, version: newVersion }
 }
 
+// ============================================================================
+// PUBLIC PROPOSAL VIEWER (used by /proposal/[token])
+// ============================================================================
+
+/**
+ * Get proposal details by public token (for draft/live proposals)
+ */
+export async function getPublicProposalDetails(token: string) {
+    const supabase = await createClient()
+
+    const { data: event, error } = await supabase
+        .from('events')
+        .select(`
+            id, name, date, end_date, venue_name, venue_address, type,
+            status, guest_count, budget_max, proposal_status,
+            client_name, client_email, client_phone, client_feedback,
+            planner_id
+        `)
+        .eq('public_token', token)
+        .single()
+
+    if (error || !event) {
+        return { error: 'Proposal not found or link has expired' }
+    }
+
+    // Get planner info
+    const { data: planner } = await supabase
+        .from('planner_profiles')
+        .select('business_name, phone')
+        .eq('user_id', event.planner_id)
+        .single()
+
+    // Get booking requests with vendor info for proposal display
+    const { data: bookings } = await supabase
+        .from('booking_requests')
+        .select(`
+            id, service, status, budget, quoted_amount, notes,
+            vendors:vendor_id (business_name, rating, category)
+        `)
+        .eq('event_id', event.id)
+        .in('status', ['accepted', 'confirmed', 'pending'])
+
+    // Get timeline items
+    const { data: timeline } = await supabase
+        .from('timeline_items')
+        .select('*')
+        .eq('event_id', event.id)
+        .order('start_time', { ascending: true })
+
+    // Build proposal object
+    const categoryIconMap: Record<string, string> = {
+        'venue': 'Building2',
+        'catering': 'UtensilsCrossed',
+        'photography': 'Camera',
+        'videography': 'Camera',
+        'decor': 'Sparkles',
+        'decoration': 'Sparkles',
+        'music': 'Music',
+        'dj': 'Music',
+        'entertainment': 'Music',
+        'makeup': 'Brush',
+        'mehendi': 'Brush',
+        'transport': 'Car',
+    }
+
+    const categories = (bookings || []).map(b => {
+        const vendor = (b as any).vendors || {}
+        const serviceKey = (b.service || '').toLowerCase()
+        const isPerPlate = serviceKey === 'catering'
+        return {
+            id: b.id,
+            name: b.service || 'Service',
+            icon: categoryIconMap[serviceKey] || 'Sparkles',
+            vendor: {
+                name: vendor.business_name || 'Partner',
+                rating: vendor.rating || 4.5,
+            },
+            price: b.quoted_amount || b.budget || 0,
+            perPlatePrice: isPerPlate ? (b.quoted_amount || b.budget || 0) / (event.guest_count || 1) : null,
+            guestCount: isPerPlate ? event.guest_count : null,
+            items: b.notes ? b.notes.split(',').map((s: string) => s.trim()) : [],
+            status: b.status,
+        }
+    })
+
+    const timelineFormatted = (timeline || []).map(t => ({
+        id: t.id,
+        time: t.start_time ? new Date(`2000-01-01T${t.start_time}`).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '',
+        duration: t.duration ? `${t.duration} min` : null,
+        title: t.title,
+        description: t.description,
+        category: t.category || 'general',
+    }))
+
+    const validDate = new Date(event.date || Date.now())
+    validDate.setDate(validDate.getDate() - 7)
+
+    return {
+        proposal: {
+            eventName: event.name,
+            date: event.date,
+            guestCount: event.guest_count,
+            city: event.venue_address || event.venue_name || '',
+            plannerName: planner?.business_name || 'Your Planner',
+            plannerPhone: planner?.phone || '',
+            personalMessage: `We're thrilled to be part of your ${event.type || 'event'}! Here's what we've curated for you.`,
+            categories,
+            timeline: timelineFormatted,
+            status: event.proposal_status,
+            validUntil: validDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }),
+            postApprovalNote: 'Once approved, we will finalize all vendor bookings, confirm the timeline, and send you a detailed event day runsheet.',
+        },
+        error: null,
+    }
+}
+
+/**
+ * Update the proposal status (approve / request changes) by public token
+ */
+export async function updateProposalStatus(token: string, status: string, feedback?: string) {
+    const supabase = await createClient()
+
+    const updateData: any = { proposal_status: status }
+    if (feedback) updateData.client_feedback = feedback
+
+    const { error } = await supabase
+        .from('events')
+        .update(updateData)
+        .eq('public_token', token)
+
+    if (error) {
+        console.error('Error updating proposal status:', error)
+        return { success: false, error: 'Failed to update' }
+    }
+
+    return { success: true }
+}
+
+/**
+ * Get final (frozen) proposal by final_proposal_token
+ */
 export async function getFinalProposal(token: string) {
     const supabase = await createClient()
 
-    const { data, error } = await supabase
-        .from('proposal_snapshots')
-        .select('*')
-        .eq('token', token)
+    // Strip 'final_' prefix if present
+    const cleanToken = token.startsWith('final_') ? token.slice(6) : token
+
+    const { data: event, error } = await supabase
+        .from('events')
+        .select(`
+            id, name, date, venue_name, venue_address, type,
+            guest_count, budget_max, proposal_status,
+            planner_id
+        `)
+        .eq('final_proposal_token', cleanToken)
         .single()
 
-    if (error || !data) {
-        console.error('Error fetching final proposal:', error)
+    if (error || !event) {
         return { error: 'Final proposal not found' }
     }
 
-    // Mark as viewed if first time
-    if (data.status === 'sent') {
-        await supabase
-            .from('proposal_snapshots')
-            .update({ status: 'viewed' })
-            .eq('id', data.id)
+    // Reuse the same proposal builder
+    const { data: planner } = await supabase
+        .from('planner_profiles')
+        .select('business_name, phone')
+        .eq('user_id', event.planner_id)
+        .single()
+
+    const { data: bookings } = await supabase
+        .from('booking_requests')
+        .select(`
+            id, service, status, budget, quoted_amount, notes,
+            vendors:vendor_id (business_name, rating, category)
+        `)
+        .eq('event_id', event.id)
+        .in('status', ['accepted', 'confirmed'])
+
+    const { data: timeline } = await supabase
+        .from('timeline_items')
+        .select('*')
+        .eq('event_id', event.id)
+        .order('start_time', { ascending: true })
+
+    const categoryIconMap: Record<string, string> = {
+        'venue': 'Building2', 'catering': 'UtensilsCrossed', 'photography': 'Camera',
+        'videography': 'Camera', 'decor': 'Sparkles', 'decoration': 'Sparkles',
+        'music': 'Music', 'dj': 'Music', 'entertainment': 'Music',
+        'makeup': 'Brush', 'mehendi': 'Brush', 'transport': 'Car',
     }
 
+    const categories = (bookings || []).map(b => {
+        const vendor = (b as any).vendors || {}
+        const serviceKey = (b.service || '').toLowerCase()
+        const isPerPlate = serviceKey === 'catering'
+        return {
+            id: b.id, name: b.service || 'Service',
+            icon: categoryIconMap[serviceKey] || 'Sparkles',
+            vendor: { name: vendor.business_name || 'Partner', rating: vendor.rating || 4.5 },
+            price: b.quoted_amount || b.budget || 0,
+            perPlatePrice: isPerPlate ? (b.quoted_amount || b.budget || 0) / (event.guest_count || 1) : null,
+            guestCount: isPerPlate ? event.guest_count : null,
+            items: b.notes ? b.notes.split(',').map((s: string) => s.trim()) : [],
+            status: b.status,
+        }
+    })
+
+    const timelineFormatted = (timeline || []).map(t => ({
+        id: t.id,
+        time: t.start_time ? new Date(`2000-01-01T${t.start_time}`).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '',
+        duration: t.duration ? `${t.duration} min` : null,
+        title: t.title, description: t.description, category: t.category || 'general',
+    }))
+
     return {
-        proposal: data.snapshot_data,
-        version: data.version,
-        status: data.status,
-        sentAt: data.sent_at,
-        isFinal: true,
+        proposal: {
+            eventName: event.name, date: event.date,
+            guestCount: event.guest_count,
+            city: event.venue_address || event.venue_name || '',
+            plannerName: planner?.business_name || 'Your Planner',
+            plannerPhone: planner?.phone || '',
+            personalMessage: `Final proposal for your ${event.type || 'event'}.`,
+            categories, timeline: timelineFormatted,
+            status: event.proposal_status,
+            validUntil: 'Final Version',
+            postApprovalNote: 'This is the final proposal. Upon approval, execution begins.',
+        },
+        status: event.proposal_status,
+        error: null,
     }
 }
 
-export async function updateFinalProposalStatus(token: string, status: 'approved' | 'declined' | 'changes_requested', feedback?: string) {
+/**
+ * Update final proposal status (approve / request changes) by final_proposal_token
+ */
+export async function updateFinalProposalStatus(token: string, status: string, feedback?: string) {
     const supabase = await createClient()
 
-    const { data: snapshot, error: fetchError } = await supabase
-        .from('proposal_snapshots')
-        .select('id, event_id')
-        .eq('token', token)
-        .single()
+    const cleanToken = token.startsWith('final_') ? token.slice(6) : token
+    const updateData: any = { proposal_status: status }
+    if (feedback) updateData.client_feedback = feedback
 
-    if (fetchError || !snapshot) {
-        return { error: 'Proposal not found' }
-    }
-
-    // Update snapshot status
     const { error } = await supabase
-        .from('proposal_snapshots')
-        .update({
-            status: status,
-            client_feedback: feedback || null,
-        })
-        .eq('id', snapshot.id)
+        .from('events')
+        .update(updateData)
+        .eq('final_proposal_token', cleanToken)
 
     if (error) {
-        return { error: 'Failed to update status' }
+        console.error('Error updating final proposal status:', error)
+        return { success: false, error: 'Failed to update' }
     }
 
-    // Also update event status
-    await supabase
-        .from('events')
-        .update({
-            proposal_status: status === 'approved' ? 'approved' : status,
-            client_feedback: feedback || null,
-        })
-        .eq('id', snapshot.event_id)
-
-    // Create notification for planner
-    try {
-        const { data: event } = await supabase
-            .from('events')
-            .select('planner_id, name, client_name')
-            .eq('id', snapshot.event_id)
-            .single()
-
-        if (event?.planner_id) {
-            const clientName = event.client_name || 'Your client'
-            const eventName = event.name || 'an event'
-
-            const notifTitle = status === 'approved'
-                ? '✅ Final Proposal Approved!'
-                : status === 'changes_requested'
-                    ? '📝 Changes Requested on Final Proposal'
-                    : '❌ Final Proposal Declined'
-
-            const notifMessage = status === 'approved'
-                ? `${clientName} has approved the final proposal for "${eventName}". You can now proceed with execution!`
-                : status === 'changes_requested'
-                    ? `${clientName} has requested changes to the final proposal for "${eventName}".${feedback ? ` Feedback: "${feedback}"` : ''}`
-                    : `${clientName} has declined the final proposal for "${eventName}".`
-
-            await supabase.from('notifications').insert({
-                user_id: event.planner_id,
-                event_id: snapshot.event_id,
-                type: status === 'approved' ? 'proposal_approved' : 'proposal_changes_requested',
-                title: notifTitle,
-                message: notifMessage,
-                link: `/planner/events/${snapshot.event_id}/client`,
-            })
-        }
-    } catch (e) {
-        console.error('Error creating notification:', e)
-    }
-
-    revalidatePath(`/proposal/${token}`)
     return { success: true }
+}
+
+// ============================================================================
+// GENERATE PROPOSAL TOKEN (used by send-panel)
+// ============================================================================
+
+/**
+ * Generate a public proposal token for an event
+ */
+export async function generateProposalToken(eventId: string) {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return { error: 'Unauthorized' }
+
+    const token = crypto.randomUUID()
+
+    const { error } = await supabase
+        .from('events')
+        .update({ public_token: token, proposal_status: 'sent' })
+        .eq('id', eventId)
+        .eq('planner_id', user.id)
+
+    if (error) {
+        console.error('generateProposalToken error:', error)
+        return { error: 'Failed to generate token' }
+    }
+
+    revalidatePath(`/planner/events/${eventId}`)
+    return { success: true, token }
 }

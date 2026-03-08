@@ -93,7 +93,7 @@ export default function VendorDashboard() {
     }
 
     const pendingRequests = requests.filter(r => {
-        const isPending = r.status === 'pending'
+        const isPending = r.status === 'pending' || r.status === 'draft' || r.status === 'quote_requested'
         console.log(`🔍 [VendorDashboard] Filtering request ${r.id}: status="${r.status}", isPending=${isPending}`)
         return isPending
     })

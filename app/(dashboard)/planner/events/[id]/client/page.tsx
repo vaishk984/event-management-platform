@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { Check, Copy, ExternalLink, RefreshCw, Smartphone, Laptop, Send, FileCheck, History } from 'lucide-react'
+import { Check, Copy, ExternalLink, RefreshCw, Smartphone, Laptop, Send, FileCheck, History, Globe, MessageSquare, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -9,13 +9,18 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/components/ui/use-toast'
 import { generateClientToken, getClientAccessDetails } from '@/actions/client-management'
-import { sendFinalProposal } from '@/actions/client-portal'
+import { sendFinalProposal, getOrCreateClientToken, sendPlannerMessage, getClientMessages } from '@/actions/client-portal'
 import { useEffect } from 'react'
 
 export default function ClientManagementPage({ params }: { params: Promise<{ id: string }> }) {
     const [event, setEvent] = useState<any>(null)
     const [loading, setLoading] = useState(true)
     const [sendingFinal, setSendingFinal] = useState(false)
+    const [portalToken, setPortalToken] = useState<string | null>(null)
+    const [generatingPortal, setGeneratingPortal] = useState(false)
+    const [clientMessages, setClientMessages] = useState<any[]>([])
+    const [replyMessage, setReplyMessage] = useState('')
+    const [sendingReply, setSendingReply] = useState(false)
     const { toast } = useToast()
     const [id, setId] = useState<string>('')
 
@@ -34,6 +39,16 @@ export default function ClientManagementPage({ params }: { params: Promise<{ id:
         } else {
             setEvent(data)
         }
+
+        // Load portal token
+        const tokenResult = await getOrCreateClientToken(eventId)
+        if (tokenResult.token) {
+            setPortalToken(tokenResult.token)
+            // Load messages
+            const msgResult = await getClientMessages(tokenResult.token)
+            setClientMessages(msgResult.data || [])
+        }
+
         setLoading(false)
     }
 
@@ -47,6 +62,18 @@ export default function ClientManagementPage({ params }: { params: Promise<{ id:
             loadDetails(id)
         }
         setLoading(false)
+    }
+
+    async function onGeneratePortalLink() {
+        setGeneratingPortal(true)
+        const result = await getOrCreateClientToken(id)
+        if (result.error) {
+            toast({ title: 'Error', description: result.error, variant: 'destructive' })
+        } else {
+            setPortalToken(result.token || null)
+            toast({ title: 'Success', description: 'Client portal link ready!' })
+        }
+        setGeneratingPortal(false)
     }
 
     async function onSendFinalProposal() {
@@ -68,12 +95,34 @@ export default function ClientManagementPage({ params }: { params: Promise<{ id:
         setSendingFinal(false)
     }
 
+    async function onSendReply() {
+        if (!replyMessage.trim()) return
+        setSendingReply(true)
+        const result = await sendPlannerMessage(id, replyMessage.trim())
+        if (result.error) {
+            toast({ title: 'Error', description: result.error, variant: 'destructive' })
+        } else {
+            toast({ title: 'Sent', description: 'Reply sent to client' })
+            setReplyMessage('')
+            // Refresh messages
+            if (portalToken) {
+                const msgResult = await getClientMessages(portalToken)
+                setClientMessages(msgResult.data || [])
+            }
+        }
+        setSendingReply(false)
+    }
+
     const publicUrl = event?.public_token
         ? `${window.location.origin}/proposal/${event.public_token}`
         : ''
 
     const finalUrl = event?.final_proposal_token
         ? `${window.location.origin}/proposal/${event.final_proposal_token}`
+        : ''
+
+    const portalUrl = portalToken
+        ? `${window.location.origin}/portal/${portalToken}`
         : ''
 
     const copyToClipboard = (url: string, label: string = 'Link') => {
@@ -223,6 +272,117 @@ export default function ClientManagementPage({ params }: { params: Promise<{ id:
                 </Card>
             </div>
 
+            {/* Client Portal Dashboard Link */}
+            <Card className="border-orange-200 bg-orange-50/20">
+                <CardHeader>
+                    <div className="flex items-center justify-between">
+                        <CardTitle className="flex items-center gap-2">
+                            <Globe className="w-5 h-5 text-orange-600" />
+                            Client Dashboard Portal
+                        </CardTitle>
+                        <Badge className="bg-orange-100 text-orange-800 text-xs border-orange-300">Client View</Badge>
+                    </div>
+                    <CardDescription>
+                        A dedicated dashboard where your client can track event progress, view D-day live updates, and contact you — all without seeing vendor details.
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    {portalToken ? (
+                        <div className="space-y-2">
+                            <Label>Client Portal Link</Label>
+                            <div className="flex gap-2">
+                                <Input value={portalUrl} readOnly className="bg-muted text-xs" />
+                                <Button size="icon" variant="outline" onClick={() => copyToClipboard(portalUrl, 'Portal link')}>
+                                    <Copy className="h-4 w-4" />
+                                </Button>
+                                <Button size="icon" variant="outline" asChild>
+                                    <a href={portalUrl} target="_blank" rel="noopener noreferrer">
+                                        <ExternalLink className="h-4 w-4" />
+                                    </a>
+                                </Button>
+                            </div>
+                            <p className="text-xs text-gray-500">Share this link with your client. Vendor details are hidden.</p>
+                        </div>
+                    ) : (
+                        <Button onClick={onGeneratePortalLink} disabled={generatingPortal} className="bg-orange-600 hover:bg-orange-700">
+                            {generatingPortal ? (
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                                <Globe className="mr-2 h-4 w-4" />
+                            )}
+                            Generate Client Portal Link
+                        </Button>
+                    )}
+                </CardContent>
+            </Card>
+
+            {/* Client Messages */}
+            <Card>
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                        <MessageSquare className="w-5 h-5 text-blue-500" />
+                        Client Messages
+                        {clientMessages.length > 0 && (
+                            <Badge variant="outline" className="ml-auto">{clientMessages.length}</Badge>
+                        )}
+                    </CardTitle>
+                    <CardDescription>Messages from your client via the portal</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    {clientMessages.length === 0 ? (
+                        <div className="text-center py-6 text-gray-400">
+                            <MessageSquare className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                            <p className="text-sm">No messages yet</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-3 max-h-[400px] overflow-y-auto">
+                            {clientMessages.map((msg: any) => (
+                                <div
+                                    key={msg.id}
+                                    className={`flex ${msg.sender_type === 'planner' ? 'justify-end' : 'justify-start'}`}
+                                >
+                                    <div className={`max-w-[75%] rounded-xl px-4 py-2 ${msg.sender_type === 'planner'
+                                            ? 'bg-blue-500 text-white'
+                                            : 'bg-gray-100 text-gray-800'
+                                        }`}>
+                                        <p className="text-sm">{msg.message}</p>
+                                        <p className={`text-xs mt-1 ${msg.sender_type === 'planner' ? 'text-blue-200' : 'text-gray-400'
+                                            }`}>
+                                            {msg.sender_type === 'planner' ? 'You' : 'Client'} •{' '}
+                                            {new Date(msg.created_at).toLocaleString('en-IN', {
+                                                day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
+                                            })}
+                                        </p>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* Reply */}
+                    <div className="flex gap-2 pt-2 border-t">
+                        <Input
+                            value={replyMessage}
+                            onChange={e => setReplyMessage(e.target.value)}
+                            placeholder="Reply to client..."
+                            onKeyDown={e => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault()
+                                    onSendReply()
+                                }
+                            }}
+                        />
+                        <Button
+                            onClick={onSendReply}
+                            disabled={sendingReply || !replyMessage.trim()}
+                            className="bg-blue-600 hover:bg-blue-700"
+                        >
+                            {sendingReply ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                        </Button>
+                    </div>
+                </CardContent>
+            </Card>
+
             {/* Client feedback section */}
             {event?.client_feedback && (
                 <Card className="border-blue-200">
@@ -237,3 +397,4 @@ export default function ClientManagementPage({ params }: { params: Promise<{ id:
         </div>
     )
 }
+

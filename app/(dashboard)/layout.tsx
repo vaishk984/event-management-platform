@@ -14,7 +14,7 @@ export default async function DashboardLayout({
     }
 
     return (
-        <DashboardWrapper userEmail={session.email}>
+        <DashboardWrapper userEmail={session.displayName || session.email} userRole={session.role}>
             {children}
         </DashboardWrapper>
     )

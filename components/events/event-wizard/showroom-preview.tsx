@@ -75,7 +75,7 @@ export function ShowroomPreview({
                     >
                         <ChevronRight className="w-4 h-4" />
                     </Button>
-                    <Link href={`/showroom?category=${category}`}>
+                    <Link href={`/showroom/browse/${category}`} target="_blank" rel="noopener noreferrer">
                         <Button variant="ghost" size="sm" className="gap-1 text-indigo-600">
                             View All <ExternalLink className="w-3 h-3" />
                         </Button>
